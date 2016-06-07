@@ -29,8 +29,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * @author David BRASSELY (brasseld at gmail.com)
@@ -58,7 +60,8 @@ public class AnalyticsServiceImpl implements AnalyticsService {
 
     @Override
     public HistogramAnalytics apiHitsByLatency(String apiId, long from, long to, long interval) {
-        return apiHits(HitsByApiQuery.Type.HITS_BY_LATENCY, apiId, from, to, interval);
+        final HistogramAnalytics histogramAnalytics = apiHits(HitsByApiQuery.Type.HITS_BY_LATENCY, apiId, from, to, interval);
+        return aggregateBuckets(histogramAnalytics);
     }
 
     @Override
@@ -68,7 +71,8 @@ public class AnalyticsServiceImpl implements AnalyticsService {
 
     @Override
     public HistogramAnalytics apiHitsByPayloadSize(String apiId, long from, long to, long interval) {
-        return apiHits(HitsByApiQuery.Type.HITS_BY_PAYLOAD_SIZE, apiId, from, to, interval);
+        final HistogramAnalytics histogramAnalytics = apiHits(HitsByApiQuery.Type.HITS_BY_PAYLOAD_SIZE, apiId, from, to, interval);
+        return aggregateBuckets(histogramAnalytics);
     }
 
     @Override
@@ -141,7 +145,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
 
         analytics.setTimestamps(histogramResponse.timestamps());
 
-        for(io.gravitee.repository.analytics.query.response.histogram.Bucket bucket : histogramResponse.values()) {
+        for (io.gravitee.repository.analytics.query.response.histogram.Bucket bucket : histogramResponse.values()) {
             Bucket analyticsBucket = convertBucket(analytics.getTimestamps(), from, interval, bucket);
             analytics.getValues().add(analyticsBucket);
         }
@@ -160,7 +164,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
             Bucket analyticsDataBucket = new Bucket();
             analyticsDataBucket.setName(dataBucket.getKey());
 
-            long [] values = new long [timestamps.size()];
+            long[] values = new long[timestamps.size()];
             for (Data data : dataBucket.getValue()) {
                 values[(int) ((data.timestamp() - from) / interval)] = data.count();
             }
@@ -180,5 +184,78 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         healthAnalytics.setBuckets(response.buckets());
 
         return healthAnalytics;
+    }
+
+    private HistogramAnalytics aggregateBuckets(final HistogramAnalytics histogramAnalytics) {
+        if (histogramAnalytics.getValues() != null && !histogramAnalytics.getValues().isEmpty()) {
+            final Bucket bucket = histogramAnalytics.getValues().get(0);
+
+            final Optional<Bucket> optBucketAverage = bucket.getBuckets().stream()
+                    .reduce((bucket1, bucket2) -> {
+                        final Bucket newBucket = new Bucket();
+                        newBucket.setName("Average");
+
+                        final long[] bucketData = bucket1.getData();
+                        final long[] newData = new long[bucketData.length];
+                        for (int i = 0; i < bucketData.length; i++) {
+                            if (bucketData[i] == 0) {
+                                newData[i] = bucket2.getData()[i];
+                            } else if (bucket2.getData()[i] == 0) {
+                                newData[i] = bucketData[i];
+                            } else {
+                                newData[i] = (bucketData[i] + bucket2.getData()[i]) / 2;
+                            }
+                        }
+                        newBucket.setData(newData);
+                        return newBucket;
+                    });
+
+            final Optional<Bucket> optBucketMin = bucket.getBuckets().stream()
+                    .reduce((bucket1, bucket2) -> {
+                        final Bucket newBucket = new Bucket();
+                        newBucket.setName("Min");
+
+                        final long[] bucketData = bucket1.getData();
+                        final long[] newData = new long[bucketData.length];
+                        for (int i = 0; i < bucketData.length; i++) {
+                            if (bucketData[i] == 0) {
+                                newData[i] = bucket2.getData()[i];
+                            } else if (bucket2.getData()[i] == 0) {
+                                newData[i] = bucketData[i];
+                            } else {
+                                newData[i] = Math.min(bucketData[i], bucket2.getData()[i]);
+                            }
+                        }
+                        newBucket.setData(newData);
+                        return newBucket;
+                    });
+
+            final Optional<Bucket> optBucketMax = bucket.getBuckets().stream()
+                    .reduce((bucket1, bucket2) -> {
+                        final Bucket newBucket = new Bucket();
+                        newBucket.setName("Max");
+
+                        final long[] bucketData = bucket1.getData();
+                        final long[] newData = new long[bucketData.length];
+                        for (int i = 0; i < bucketData.length; i++) {
+                            newData[i] = Math.max(bucketData[i], bucket2.getData()[i]);
+                        }
+                        newBucket.setData(newData);
+                        return newBucket;
+                    });
+
+            final List<Bucket> buckets = new ArrayList<>(3);
+            if (optBucketAverage.isPresent()) {
+                buckets.add(optBucketAverage.get());
+            }
+            if (optBucketMin.isPresent()) {
+                buckets.add(optBucketMin.get());
+            }
+            if (optBucketMax.isPresent()) {
+                buckets.add(optBucketMax.get());
+            }
+            bucket.setBuckets(buckets);
+        }
+        return histogramAnalytics;
     }
 }
